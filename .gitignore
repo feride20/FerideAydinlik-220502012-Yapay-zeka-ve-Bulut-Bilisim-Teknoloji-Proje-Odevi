@@ -1,0 +1,19 @@
+# Virtual env (asla git'e koyma)
+feride_train/
+venv/
+.venv/
+env/
+
+# Model çıktıları / checkpoint (çok büyük)
+fruit_vit_out/
+
+# Dataset (çok büyük)
+archive/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db

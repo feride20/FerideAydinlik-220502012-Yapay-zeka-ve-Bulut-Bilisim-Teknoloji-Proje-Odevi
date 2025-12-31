@@ -1,0 +1,223 @@
+import os
+import glob
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from datasets import load_dataset, DatasetDict
+from transformers import (
+    ViTImageProcessor,
+    ViTForImageClassification,
+    TrainingArguments,
+    Trainer,
+    default_data_collator,
+    EarlyStoppingCallback
+)
+
+from sklearn.metrics import (
+    accuracy_score,
+    precision_recall_fscore_support,
+    classification_report,
+    confusion_matrix
+)
+
+
+ARCHIVE_ROOT = r"C:\Users\Feride\Desktop\Fruits_vision\archive"  
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"\n Kullanılan Cihaz: {device.upper()}")
+
+
+def find_split_dir(root, split_name: str) -> str:
+    candidates = glob.glob(os.path.join(root, f"{split_name}*"))
+    if not candidates:
+        raise FileNotFoundError(f" '{split_name}*' ile başlayan klasör bulunamadı. root: {root}")
+
+    parent = sorted(candidates)[0]
+
+    direct = os.path.join(parent, split_name)
+    if os.path.isdir(direct):
+        return direct
+
+    for sub in os.listdir(parent):
+        maybe = os.path.join(parent, sub, split_name)
+        if os.path.isdir(maybe):
+            return maybe
+
+    for sub in os.listdir(parent):
+        maybe = os.path.join(parent, sub)
+        if os.path.isdir(maybe) and os.path.basename(maybe).lower() == split_name:
+            return maybe
+
+    raise FileNotFoundError(f" Split klasörü bulunamadı: {split_name} | parent: {parent}")
+
+train_dir = find_split_dir(ARCHIVE_ROOT, "train")
+val_dir   = find_split_dir(ARCHIVE_ROOT, "validation")
+test_dir  = find_split_dir(ARCHIVE_ROOT, "test")
+
+print("\n Bulunan split klasörleri:")
+print(" - Train:", train_dir)
+print(" - Val  :", val_dir)
+print(" - Test :", test_dir)
+
+
+train_ds = load_dataset("imagefolder", data_dir=train_dir, split="train")
+val_ds   = load_dataset("imagefolder", data_dir=val_dir,   split="train")
+test_ds  = load_dataset("imagefolder", data_dir=test_dir,  split="train")
+
+ds = DatasetDict({"train": train_ds, "validation": val_ds, "test": test_ds})
+
+labels = ds["train"].features["label"].names
+label2id = {label: i for i, label in enumerate(labels)}
+id2label = {i: label for i, label in enumerate(labels)}
+print(f"\n Sınıf sayısı: {len(labels)} -> {labels}")
+
+
+
+MODEL_NAME = "google/vit-base-patch16-224"
+processor = ViTImageProcessor.from_pretrained(MODEL_NAME)
+
+def transform(batch):
+    images = [img.convert("RGB") for img in batch["image"]]
+    inputs = processor(images, return_tensors="pt")
+    inputs["labels"] = torch.tensor(batch["label"])
+    return inputs
+
+prepared_ds = ds.with_transform(transform)
+
+
+model = ViTForImageClassification.from_pretrained(
+    MODEL_NAME,
+    num_labels=len(labels),
+    id2label=id2label,
+    label2id=label2id,
+    ignore_mismatched_sizes=True
+).to(device)
+
+
+def compute_metrics(eval_pred):
+    preds = eval_pred.predictions
+    y_true = eval_pred.label_ids
+    y_pred = np.argmax(preds, axis=1)
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="macro", zero_division=0
+    )
+
+    return {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "precision_macro": float(precision),
+        "recall_macro": float(recall),
+        "f1_macro": float(f1),
+    }
+
+
+training_args = TrainingArguments(
+    output_dir="./fruit_vit_out",
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=16,
+    num_train_epochs=2,
+    learning_rate=2e-5,
+    weight_decay=0.01,
+    remove_unused_columns=False,
+
+    eval_strategy="epoch",
+    logging_strategy="epoch",
+    save_strategy="epoch",
+
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+    greater_is_better=False,
+
+    fp16=(device == "cuda"),
+    dataloader_num_workers=0,
+    report_to="none"
+)
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=prepared_ds["train"],
+    eval_dataset=prepared_ds["validation"],
+    compute_metrics=compute_metrics,
+    processing_class=processor,
+    data_collator=default_data_collator,
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]
+)
+
+
+print("\n Test değerlendiriliyor...")
+test_metrics = trainer.evaluate(prepared_ds["test"])
+print("\n Test Metrics:", test_metrics)
+
+
+pred = trainer.predict(prepared_ds["test"])
+y_true = pred.label_ids
+y_pred = np.argmax(pred.predictions, axis=1)
+
+print("\n Classification Report (Test):")
+print(classification_report(y_true, y_pred, target_names=labels, digits=4))
+
+cm = confusion_matrix(y_true, y_pred)
+print("\n Confusion Matrix (Test):")
+print(cm)
+
+plt.figure(figsize=(7, 6))
+plt.imshow(cm, interpolation="nearest")
+plt.title("Confusion Matrix (Test)")
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.xticks(ticks=np.arange(len(labels)), labels=labels, rotation=45, ha="right")
+plt.yticks(ticks=np.arange(len(labels)), labels=labels)
+plt.colorbar()
+plt.tight_layout()
+plt.savefig("confusion_matrix.png", dpi=200)
+plt.show()
+print(" confusion_matrix.png kaydedildi.")
+
+
+trainer.save_model("./fruit_vit_out")
+processor.save_pretrained("./fruit_vit_out")
+print(" Model kaydedildi: ./fruit_vit_out")
+
+
+logs = trainer.state.log_history
+df = pd.DataFrame(logs)
+
+if "step" not in df.columns:
+    print("Loglarda 'step' bulunamadı. Grafik çizilemedi.")
+else:
+    train_loss = df[df.get("loss").notna()][["step", "loss"]].drop_duplicates("step")
+    val_loss   = df[df.get("eval_loss").notna()][["step", "eval_loss"]].drop_duplicates("step")
+    val_acc    = df[df.get("eval_accuracy").notna()][["step", "eval_accuracy"]].drop_duplicates("step")
+
+    
+    plt.figure()
+    if len(train_loss) > 0:
+        plt.plot(train_loss["step"], train_loss["loss"], label="Training Loss")
+    if len(val_loss) > 0:
+        plt.plot(val_loss["step"], val_loss["eval_loss"], label="Validation Loss")
+    plt.xlabel("Step")
+    plt.ylabel("Loss")
+    plt.title("Loss (Step Bazlı)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("loss.png", dpi=200)
+    plt.show()
+
+    
+    plt.figure()
+    if len(val_acc) > 0:
+        plt.plot(val_acc["step"], val_acc["eval_accuracy"], label="Validation Accuracy")
+        plt.xlabel("Step")
+        plt.ylabel("Accuracy")
+        plt.title("Accuracy (Step Bazlı)")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig("accuracy.png", dpi=200)
+        plt.show()
+    else:
+        print("Not: 'eval_accuracy' loglarda yok. Accuracy grafiği çizilemedi.")
+
+    print("\n Grafikler kaydedildi: loss.png, accuracy.png")
