@@ -2,6 +2,7 @@
 **Yapay Zeka ve Bulut Bilişim Teknolojileri – Proje Ödevi**
 
 ---
+##DataSet Olan Klasörümü Drive Linki:https://drive.google.com/file/d/10CanuV1FzCjav5SWWrjt1nMegxj9R1Gt/view?usp=drive_link
 
 ##  Proje Tanımı
 Bu projede, yapay zeka destekli bir **görüntü sınıflandırma sistemi** geliştirilmiştir.  
